@@ -74,6 +74,8 @@
                                     <listOptionValue builtIn="false" value="&quot;${ESP32TOOLCHAIN}/xtensa-esp32-elf/include&quot;"/>
                                     									
                                     <listOptionValue builtIn="false" value="&quot;${IDF_PATH}/components/tcpip_adapter/include&quot;"/>
+                                    									
+                                    <listOptionValue builtIn="false" value="&quot;${IDF_PATH}/components/driver/include&quot;"/>
                                     								
                                 </option>
                                 								
