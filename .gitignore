@@ -1,2 +1,4 @@
 wifi_credentials.h
+aws_config.h
+aws_config.c
 

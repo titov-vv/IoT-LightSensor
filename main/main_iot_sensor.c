@@ -6,9 +6,12 @@
 	- Publish data into cloud
 */
 #include <stdio.h>
+#include <string.h>
+#include "../build/config/sdkconfig.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
+
 #include "esp_system.h"
 #include "esp_spi_flash.h"
 #include "esp_wifi.h"
@@ -17,6 +20,10 @@
 #include "nvs_flash.h"
 #include "tcpip_adapter.h"
 #include "driver/i2c.h"
+
+#include "aws_iot_mqtt_client_interface.h"
+
+#include "aws_config.h"
 // Here is a private file with WiFi connection details
 // It contains defines for WIFI_SSID and WIFI_PASSWORD
 #include "wifi_credentials.h"
@@ -25,6 +32,7 @@
 #define	TAG_MAIN	"APP"
 #define TAG_WIFI	"WIFI"
 #define TAG_I2C		"I2C"
+#define TAG_AWS		"AWS"
 //-----------------------------------------------------------------------------
 #define LED_PIN				GPIO_NUM_2
 // Light sensor connection details
@@ -38,7 +46,13 @@
 // How often to get data from light sensor, ms
 #define I2C_POLL_INTERVAL	5000
 //-----------------------------------------------------------------------------
+char AWS_host[255] = AWS_HOST;
+uint32_t AWS_port = AWS_PORT;
+//-----------------------------------------------------------------------------
 static int wifi_retry = 0;
+/* FreeRTOS event group to to check signals */
+static EventGroupHandle_t events_group;
+const int IP_UP_BIT = BIT0;	// Bit to check IP link readiness
 //-----------------------------------------------------------------------------
 static void event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
 {
@@ -49,14 +63,17 @@ static void event_handler(void* arg, esp_event_base_t event_base, int32_t event_
 		case WIFI_EVENT_STA_START:
 			ESP_LOGI(TAG_WIFI, "Connecting...");
 			esp_wifi_connect();
+			xEventGroupClearBits(events_group, IP_UP_BIT);
 			break;
 		case WIFI_EVENT_STA_CONNECTED:
+			wifi_retry = 0;
 			ESP_LOGI(TAG_WIFI, "Connected");
 			break;
 		case WIFI_EVENT_STA_DISCONNECTED:
 			wifi_retry++;
 			ESP_LOGI(TAG_WIFI, "Reconnection attempt %d", wifi_retry);
 			esp_wifi_connect();
+			xEventGroupClearBits(events_group, IP_UP_BIT);
 			break;
 		}
 	}
@@ -66,8 +83,8 @@ static void event_handler(void* arg, esp_event_base_t event_base, int32_t event_
 		switch(event_id)
 		{
 		case IP_EVENT_STA_GOT_IP:
+			xEventGroupSetBits(events_group, IP_UP_BIT);
 			ESP_LOGI(TAG_WIFI, "Received IP: %s", ip4addr_ntoa(&((ip_event_got_ip_t*)event_data)->ip_info.ip));
-			wifi_retry = 0;
 			break;
 		}
 	}
@@ -79,6 +96,8 @@ void wifi_start(void)
 	tcpip_adapter_init();
 	wifi_init_config_t wifi_init_cfg = WIFI_INIT_CONFIG_DEFAULT();
 	ESP_ERROR_CHECK(esp_wifi_init(&wifi_init_cfg));
+// TODO
+// ESP_ERROR_CHECK( esp_wifi_set_storage(WIFI_STORAGE_RAM) );
 	ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL));
 	ESP_LOGI(TAG_WIFI, "Initialization completed");
@@ -190,6 +209,100 @@ void i2c_start(void)
 	ESP_LOGI(TAG_I2C, "Task created");
 }
 //-----------------------------------------------------------------------------
+void aws_disconnect_handler(AWS_IoT_Client *pClient, void *data)
+{
+    ESP_LOGW(TAG_AWS, "MQTT Disconnect");
+}
+//-----------------------------------------------------------------------------
+void aws_iot_task(void *arg)
+{
+    IoT_Error_t rc = FAILURE;
+    AWS_IoT_Client aws_client;
+	IoT_Client_Init_Params mqttInitParams = iotClientInitParamsDefault;
+	IoT_Client_Connect_Params connectParams = iotClientConnectParamsDefault;
+
+	ESP_LOGI(TAG_AWS, "MQTT init started");
+	mqttInitParams.enableAutoReconnect = false; // We enable this later below
+	mqttInitParams.pHostURL = AWS_host;
+	mqttInitParams.port = AWS_port;
+	mqttInitParams.pRootCALocation = aws_root_ca_pem;
+    mqttInitParams.pDeviceCertLocation = certificate_pem_crt;
+    mqttInitParams.pDevicePrivateKeyLocation = private_pem_key;
+    mqttInitParams.mqttCommandTimeout_ms = 20000;
+    mqttInitParams.tlsHandshakeTimeout_ms = 5000;
+    mqttInitParams.isSSLHostnameVerify = true;
+    mqttInitParams.disconnectHandler = aws_disconnect_handler;
+    mqttInitParams.disconnectHandlerData = NULL;
+
+    rc = aws_iot_mqtt_init(&aws_client, &mqttInitParams);
+    if (rc != SUCCESS)
+    {
+        ESP_LOGE(TAG_AWS, "MQTT init failure: %d ", rc);
+        vTaskDelete(NULL);
+        return;
+    }
+    ESP_LOGI(TAG_AWS, "MQTT init success");
+
+    ESP_LOGI(TAG_AWS, "Wait for IP link");
+    xEventGroupWaitBits(events_group, IP_UP_BIT, false, true, portMAX_DELAY);
+    ESP_LOGI(TAG_AWS, "IP link is up");
+
+    ESP_LOGI(TAG_AWS, "MQTT connect started");
+    connectParams.keepAliveIntervalInSec = 60;
+    connectParams.isCleanSession = true;
+    connectParams.MQTTVersion = MQTT_3_1_1;
+    connectParams.pClientID = AWS_CLIENTID;
+    connectParams.clientIDLen = (uint16_t) strlen(AWS_CLIENTID);
+    connectParams.isWillMsgPresent = false;
+    do
+    {
+        rc = aws_iot_mqtt_connect(&aws_client, &connectParams);
+        if(rc != SUCCESS) {
+            ESP_LOGE(TAG_AWS, "MQTT error: %d", rc);
+            vTaskDelay(5000 / portTICK_RATE_MS);
+        }
+    }
+    while(rc != SUCCESS);
+    ESP_LOGI(TAG_AWS, "MQTT connected");
+
+    rc = aws_iot_mqtt_autoreconnect_set_status(&aws_client, true);
+    if(rc == SUCCESS)
+    	ESP_LOGI(TAG_AWS, "MQTT auto-reconnect enabled");
+    else
+    	ESP_LOGE(TAG_AWS, "MQTT auto-reconnect setup failure: %d ", rc);
+
+    int i = 0;
+    char cPayload[128];
+    IoT_Publish_Message_Params paramsQOS0;
+    paramsQOS0.qos = QOS0;
+    paramsQOS0.payload = (void *) cPayload;
+    paramsQOS0.isRetained = 0;
+    const int topic_len = strlen(AWS_TOPIC);
+    while(1)
+    {
+    	rc = aws_iot_mqtt_yield(&aws_client, 100);
+    	if (rc != SUCCESS)
+    		continue;
+
+        ESP_LOGI(TAG_AWS, "Stack remaining: %d bytes", uxTaskGetStackHighWaterMark(NULL));
+        vTaskDelay(10000 / portTICK_RATE_MS);
+        sprintf(cPayload, "TEST MESSAGE #%d ", i++);
+        paramsQOS0.payloadLen = strlen(cPayload);
+        rc = aws_iot_mqtt_publish(&aws_client, AWS_TOPIC, topic_len, &paramsQOS0);
+        if (rc == SUCCESS)
+        	ESP_LOGI(TAG_AWS, "MQTT message published: '%s'", cPayload);
+        else
+          	ESP_LOGE(TAG_AWS, "MQTT publish failure: %d ", rc);
+    }
+
+    vTaskDelete(NULL);
+}
+//-----------------------------------------------------------------------------
+void aws_start(void)
+{
+	xTaskCreate(aws_iot_task, "aws_iot_task", 10240, (void *)0, 5, NULL);
+}
+//-----------------------------------------------------------------------------
 void app_main(void)
 {
 	ESP_LOGI(TAG_MAIN, "Light Sensor v1.0 STARTED");
@@ -197,10 +310,13 @@ void app_main(void)
 	ESP_LOGI(TAG_MAIN, "Flash initialized");
 	ESP_ERROR_CHECK(esp_event_loop_create_default());
 	ESP_LOGI(TAG_MAIN, "Event loop created");
+	events_group = xEventGroupCreate();
+	gpio_set_direction(LED_PIN, GPIO_MODE_OUTPUT);
 
 	wifi_start();
 
-	gpio_set_direction(LED_PIN, GPIO_MODE_OUTPUT);
 	i2c_start();
+
+	aws_start();
 }
 //-----------------------------------------------------------------------------

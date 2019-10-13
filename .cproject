@@ -76,6 +76,8 @@
                                     <listOptionValue builtIn="false" value="&quot;${IDF_PATH}/components/tcpip_adapter/include&quot;"/>
                                     									
                                     <listOptionValue builtIn="false" value="&quot;${IDF_PATH}/components/driver/include&quot;"/>
+                                    									
+                                    <listOptionValue builtIn="false" value="&quot;${IDF_PATH}/../esp-aws-iot/aws-iot-device-sdk-embedded-C/include&quot;"/>
                                     								
                                 </option>
                                 								
