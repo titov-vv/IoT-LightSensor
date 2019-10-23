@@ -48,6 +48,7 @@
 #define I2C_POLL_INTERVAL	5000
 // how often to publish data to the cloud, s
 #define AWS_PUB_INTERVAL	15
+#define MAX_JSON_SIZE		64
 //-----------------------------------------------------------------------------
 char AWS_host[255] = AWS_HOST;
 uint32_t AWS_port = AWS_PORT;
@@ -133,7 +134,7 @@ static esp_err_t i2c_get_data(uint8_t *data_h, uint8_t *data_l)
         return res;
 
 // 2. wait more than 24 ms
-    vTaskDelay(30 / portTICK_RATE_MS);
+    vTaskDelay(180 / portTICK_RATE_MS);
 
 // 3. read data
 // |-------|---------------------|--------------------|--------------------|------|
@@ -278,7 +279,8 @@ void aws_iot_task(void *arg)
     char cPayload[128];
     IoT_Publish_Message_Params paramsQOS0;
     cJSON *root;
-    char  *msg;
+    char JSON_buffer[MAX_JSON_SIZE];
+
     paramsQOS0.qos = QOS0;
     paramsQOS0.payload = (void *) cPayload;
     paramsQOS0.isRetained = 0;
@@ -289,30 +291,30 @@ void aws_iot_task(void *arg)
     	if (rc != SUCCESS)
     		continue;
 
-        ESP_LOGI(TAG_AWS, "Stack remaining: %d bytes", uxTaskGetStackHighWaterMark(NULL));
-        vTaskDelay(AWS_PUB_INTERVAL * 1000 / portTICK_RATE_MS);
-
         // Make a test with JSON simple message:
         //        {
         //        	"data": 12.345
         //        }
-        ESP_LOGI(TAG_AWS, "JSON, %d", i);
         root = cJSON_CreateObject();
-        ESP_LOGI(TAG_AWS, "JSON root");
         cJSON_AddNumberToObject(root, "data", i++);
-        sprintf(cPayload, "TEST MESSAGE #%d ", i++);
-        ESP_LOGI(TAG_AWS, "Payload: %s", cPayload);
-        msg = cJSON_Print(root);
-        ESP_LOGI(TAG_AWS, "JSON msg: %s", msg);
-        ESP_LOGI(TAG_AWS, "JSON len: %d", strlen(msg));
-        paramsQOS0.payload = (void *) msg;
-        paramsQOS0.payloadLen = strlen(msg);
+        if (!cJSON_PrintPreallocated(root, JSON_buffer, MAX_JSON_SIZE, 1 /* formatted */))
+        {
+        	ESP_LOGW(TAG_AWS, "JSON buffer too small");
+            JSON_buffer[0] = 0;
+        }
+        cJSON_Delete(root);
+        ESP_LOGI(TAG_AWS, "JSON message: %s", JSON_buffer);
+
+        paramsQOS0.payload = (void *) JSON_buffer;
+        paramsQOS0.payloadLen = strlen(JSON_buffer);
         rc = aws_iot_mqtt_publish(&aws_client, AWS_TOPIC, topic_len, &paramsQOS0);
         if (rc == SUCCESS)
-        	ESP_LOGI(TAG_AWS, "MQTT message published: '%s'", cPayload);
+        	ESP_LOGI(TAG_AWS, "MQTT message published");
         else
           	ESP_LOGE(TAG_AWS, "MQTT publish failure: %d ", rc);
-        cJSON_Delete(root);
+
+        ESP_LOGI(TAG_AWS, "Stack remaining: %d bytes", uxTaskGetStackHighWaterMark(NULL));
+        vTaskDelay(AWS_PUB_INTERVAL * 1000 / portTICK_RATE_MS);
     }
 
     vTaskDelete(NULL);
