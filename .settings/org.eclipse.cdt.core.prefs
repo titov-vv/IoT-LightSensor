@@ -1,0 +1,6 @@
+eclipse.preferences.version=1
+environment/project/0.1949418468/ESP32TOOLCHAIN/delimiter=\:
+environment/project/0.1949418468/ESP32TOOLCHAIN/operation=append
+environment/project/0.1949418468/ESP32TOOLCHAIN/value=/home/vtitov/esp/xtensa-esp32-elf
+environment/project/0.1949418468/append=true
+environment/project/0.1949418468/appendContributed=true

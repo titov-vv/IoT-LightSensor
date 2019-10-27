@@ -11,6 +11,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
+#define 	INCLUDE_xTaskGetHandle		1
 
 #include "esp_system.h"
 #include "esp_spi_flash.h"
@@ -36,9 +37,9 @@
 #define TAG_AWS		"AWS"
 //-----------------------------------------------------------------------------
 #define LED_PIN				GPIO_NUM_2
-// Light sensor connection details
-#define SENSOR_SDA_PIN		GPIO_NUM_12
-#define SENSOR_SCL_PIN		GPIO_NUM_13
+// Light sensor connection details - use default ESP32 I2C pins
+#define SENSOR_SDA_PIN		GPIO_NUM_21
+#define SENSOR_SCL_PIN		GPIO_NUM_22
 #define SENSOR_ADDR			0x23
 // Sensor start operation command after power-on
 #define SENSOR_CMD_START	0x01
@@ -47,7 +48,7 @@
 // How often to get data from light sensor, ms
 #define I2C_POLL_INTERVAL	5000
 // how often to publish data to the cloud, s
-#define AWS_PUB_INTERVAL	15
+#define AWS_PUB_INTERVAL	300
 #define MAX_JSON_SIZE		64
 //-----------------------------------------------------------------------------
 char AWS_host[255] = AWS_HOST;
@@ -57,6 +58,7 @@ static int wifi_retry = 0;
 /* FreeRTOS event group to to check signals */
 static EventGroupHandle_t events_group;
 const int IP_UP_BIT = BIT0;	// Bit to check IP link readiness
+TaskHandle_t aws_iot_task_handle = NULL;
 //-----------------------------------------------------------------------------
 static void event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
 {
@@ -154,8 +156,9 @@ static esp_err_t i2c_get_data(uint8_t *data_h, uint8_t *data_l)
 //-----------------------------------------------------------------------------
 void read_sensor_task(void *arg)
 {
-	int res, led = 1;
+	int res;
 	uint8_t sensor_data_h, sensor_data_l;
+	uint32_t raw_sensor_data;
 
 	// do job forever
 	while(1)
@@ -165,17 +168,23 @@ void read_sensor_task(void *arg)
 			ESP_LOGE(TAG_I2C, "Command failure, 0x%x", res);
 		else
 		{
-			ESP_LOGI(TAG_I2C, "data_h: %02x", sensor_data_h);
-			ESP_LOGI(TAG_I2C, "data_l: %02x", sensor_data_l);
-			ESP_LOGI(TAG_I2C, "sensor val: %.02f [Lux]", (sensor_data_h << 8 | sensor_data_l) / 1.2);
-        }
+			raw_sensor_data = sensor_data_h << 8 | sensor_data_l;
+			ESP_LOGI(TAG_I2C, "Sensor raw: %d", raw_sensor_data);
 
-		// blink led
-		gpio_set_level(LED_PIN, led);
-		if (led == 1)
-			led = 0;
-		else
-			led = 1;
+			if (aws_iot_task_handle != NULL)
+			{
+				xTaskNotify(aws_iot_task_handle, raw_sensor_data, eSetValueWithOverwrite);
+				ESP_LOGI(TAG_I2C, "AWS task notified");
+			}
+			else
+				ESP_LOGI(TAG_I2C, "No AWS task to notify");
+        }
+//		// blink led
+//		gpio_set_level(LED_PIN, led);
+//		if (led == 1)
+//			led = 0;
+//		else
+//			led = 1;
 
 		vTaskDelay(I2C_POLL_INTERVAL / portTICK_RATE_MS);
 	}
@@ -275,8 +284,8 @@ void aws_iot_task(void *arg)
     else
     	ESP_LOGE(TAG_AWS, "MQTT auto-reconnect setup failure: %d ", rc);
 
-    int i = 0;
     char cPayload[128];
+    uint32_t sensor_data;
     IoT_Publish_Message_Params paramsQOS0;
     cJSON *root;
     char JSON_buffer[MAX_JSON_SIZE];
@@ -291,12 +300,14 @@ void aws_iot_task(void *arg)
     	if (rc != SUCCESS)
     		continue;
 
+    	xTaskNotifyWait(0x00, ULONG_MAX, &sensor_data, 0);
+    	ESP_LOGI(TAG_AWS, "Got from I2C task %d", sensor_data);
         // Make a test with JSON simple message:
         //        {
         //        	"data": 12.345
         //        }
         root = cJSON_CreateObject();
-        cJSON_AddNumberToObject(root, "data", i++);
+        cJSON_AddNumberToObject(root, "data", sensor_data);
         if (!cJSON_PrintPreallocated(root, JSON_buffer, MAX_JSON_SIZE, 1 /* formatted */))
         {
         	ESP_LOGW(TAG_AWS, "JSON buffer too small");
@@ -322,7 +333,7 @@ void aws_iot_task(void *arg)
 //-----------------------------------------------------------------------------
 void aws_start(void)
 {
-	xTaskCreate(aws_iot_task, "aws_iot_task", 10240, (void *)0, 5, NULL);
+	xTaskCreate(aws_iot_task, "aws_iot_task", 10240, (void *)0, 5, &aws_iot_task_handle);
 }
 //-----------------------------------------------------------------------------
 void app_main(void)

@@ -1,0 +1,1 @@
+cmd='/usr/bin/cmake;-DSDKCONFIG=/home/vtitov/esp/workspace/IoT-LightSensor/sdkconfig;-DIDF_PATH=/home/vtitov/esp/esp-idf;-DIDF_TARGET=esp32;-DPYTHON_DEPS_CHECKED=1;-DPYTHON=/home/vtitov/.espressif/python_env/idf4.1_py3.7_env/bin/python;-DEXTRA_COMPONENT_DIRS=/home/vtitov/esp/esp-idf/components/bootloader;-DLEGACY_INCLUDE_COMMON_HEADERS=;-GNinja;<SOURCE_DIR><SOURCE_SUBDIR>'
