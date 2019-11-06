@@ -7,6 +7,7 @@
 //-----------------------------------------------------------------------------
 #include "main.h"
 #include "i2c.h"
+#include "thing.h"
 
 #include "esp_log.h"
 #include "driver/i2c.h"
