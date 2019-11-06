@@ -23,18 +23,17 @@
 #include "driver/i2c.h"
 #include "cJSON.h"
 
+//Project
+#include "main.h"
+#include "blink.h"
+#include "wifi.h"
+//-----------------------------------------------------------------------------
+// FreeRTOS event group to to synchronize between tasks
+EventGroupHandle_t events_group;
+
 #include "aws_iot_mqtt_client_interface.h"
 
 #include "aws_config.h"
-// Here is a private file with WiFi connection details
-// It contains defines for WIFI_SSID and WIFI_PASSWORD
-#include "wifi_credentials.h"
-//-----------------------------------------------------------------------------
-// Define TAGs for log messages
-#define	TAG_MAIN	"APP"
-#define TAG_WIFI	"WIFI"
-#define TAG_I2C		"I2C"
-#define TAG_AWS		"AWS"
 //-----------------------------------------------------------------------------
 #define LED_PIN				GPIO_NUM_2
 // Light sensor connection details - use default ESP32 I2C pins
@@ -54,67 +53,7 @@
 char AWS_host[255] = AWS_HOST;
 uint32_t AWS_port = AWS_PORT;
 //-----------------------------------------------------------------------------
-static int wifi_retry = 0;
-/* FreeRTOS event group to to check signals */
-static EventGroupHandle_t events_group;
-const int IP_UP_BIT = BIT0;	// Bit to check IP link readiness
 TaskHandle_t aws_iot_task_handle = NULL;
-//-----------------------------------------------------------------------------
-static void event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
-{
-	if (event_base == WIFI_EVENT)
-	{
-		switch(event_id)
-		{
-		case WIFI_EVENT_STA_START:
-			ESP_LOGI(TAG_WIFI, "Connecting...");
-			esp_wifi_connect();
-			xEventGroupClearBits(events_group, IP_UP_BIT);
-			break;
-		case WIFI_EVENT_STA_CONNECTED:
-			wifi_retry = 0;
-			ESP_LOGI(TAG_WIFI, "Connected");
-			break;
-		case WIFI_EVENT_STA_DISCONNECTED:
-			wifi_retry++;
-			ESP_LOGI(TAG_WIFI, "Reconnection attempt %d", wifi_retry);
-			esp_wifi_connect();
-			xEventGroupClearBits(events_group, IP_UP_BIT);
-			break;
-		}
-	}
-
-	if (event_base == IP_EVENT)
-	{
-		switch(event_id)
-		{
-		case IP_EVENT_STA_GOT_IP:
-			xEventGroupSetBits(events_group, IP_UP_BIT);
-			ESP_LOGI(TAG_WIFI, "Received IP: %s", ip4addr_ntoa(&((ip_event_got_ip_t*)event_data)->ip_info.ip));
-			break;
-		}
-	}
-}
-//-----------------------------------------------------------------------------
-void wifi_start(void)
-{
-	ESP_LOGI(TAG_WIFI, "Initialization started");
-	tcpip_adapter_init();
-	wifi_init_config_t wifi_init_cfg = WIFI_INIT_CONFIG_DEFAULT();
-	ESP_ERROR_CHECK(esp_wifi_init(&wifi_init_cfg));
-// TODO
-// ESP_ERROR_CHECK( esp_wifi_set_storage(WIFI_STORAGE_RAM) );
-	ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL));
-    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL));
-	ESP_LOGI(TAG_WIFI, "Initialization completed");
-
-	ESP_LOGI(TAG_WIFI, "Connect to '%s'", WIFI_SSID);
-	wifi_config_t wifi_cfg = { .sta = { .ssid = WIFI_SSID, .password = WIFI_PASSWORD }};
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_cfg));
-    ESP_ERROR_CHECK(esp_wifi_start());
-    ESP_LOGI(TAG_WIFI, "Connection start...");
-}
 //-----------------------------------------------------------------------------
 static esp_err_t i2c_get_data(uint8_t *data_h, uint8_t *data_l)
 {
