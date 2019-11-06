@@ -8,25 +8,19 @@
 #include <stdio.h>
 #include <string.h>
 #include "../build/config/sdkconfig.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "freertos/event_groups.h"
-#define 	INCLUDE_xTaskGetHandle		1
 
 #include "esp_system.h"
 #include "esp_spi_flash.h"
-#include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
-#include "tcpip_adapter.h"
-#include "driver/i2c.h"
 #include "cJSON.h"
 
 //Project
 #include "main.h"
 #include "blink.h"
 #include "wifi.h"
+#include "i2c.h"
 //-----------------------------------------------------------------------------
 // FreeRTOS event group to to synchronize between tasks
 EventGroupHandle_t events_group;
@@ -35,17 +29,7 @@ EventGroupHandle_t events_group;
 
 #include "aws_config.h"
 //-----------------------------------------------------------------------------
-#define LED_PIN				GPIO_NUM_2
-// Light sensor connection details - use default ESP32 I2C pins
-#define SENSOR_SDA_PIN		GPIO_NUM_21
-#define SENSOR_SCL_PIN		GPIO_NUM_22
-#define SENSOR_ADDR			0x23
-// Sensor start operation command after power-on
-#define SENSOR_CMD_START	0x01
-// Sensor mode - 0x10 high res, 0x13 low res
-#define SENSOR_CMD_MODE		0x10
-// How often to get data from light sensor, ms
-#define I2C_POLL_INTERVAL	5000
+
 // how often to publish data to the cloud, s
 #define AWS_PUB_INTERVAL	300
 #define MAX_JSON_SIZE		64
@@ -55,110 +39,15 @@ uint32_t AWS_port = AWS_PORT;
 //-----------------------------------------------------------------------------
 TaskHandle_t aws_iot_task_handle = NULL;
 //-----------------------------------------------------------------------------
-static esp_err_t i2c_get_data(uint8_t *data_h, uint8_t *data_l)
+void aws_notify_task_with_sensor_data(uint32_t raw_sensor_data)
 {
-	int res = 0;
-	i2c_cmd_handle_t cmd;
-
-// 1. set operation mode
-// |-------|---------------------|----------------|------|
-// | start | addr + wr_bit + ack | op_mode + ack  | stop |
-// |-------|---------------------|----------------|------|
-    cmd = i2c_cmd_link_create();
-    i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, SENSOR_ADDR << 1 | I2C_MASTER_WRITE, 0x01 /*expect ACK*/);
-    i2c_master_write_byte(cmd, SENSOR_CMD_MODE, 0x01 /*expect ACK*/);
-    i2c_master_stop(cmd);
-    res = i2c_master_cmd_begin(I2C_NUM_0, cmd, 1000 / portTICK_RATE_MS);
-    i2c_cmd_link_delete(cmd);
-    if (res != ESP_OK)
-        return res;
-
-// 2. wait more than 24 ms
-    vTaskDelay(180 / portTICK_RATE_MS);
-
-// 3. read data
-// |-------|---------------------|--------------------|--------------------|------|
-// | start | addr + rd_bit + ack | read 1 byte + ack  | read 1 byte + nack | stop |
-// |-------|---------------------|--------------------|--------------------|------|
-    cmd = i2c_cmd_link_create();
-    i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, SENSOR_ADDR << 1 | I2C_MASTER_READ, 0x01 /*expect ACK*/);
-    i2c_master_read_byte(cmd, data_h, 0x00 /*ACK*/);
-    i2c_master_read_byte(cmd, data_l, 0x01 /*NACK*/);
-    i2c_master_stop(cmd);
-    res = i2c_master_cmd_begin(I2C_NUM_0, cmd, 1000 / portTICK_RATE_MS);
-    i2c_cmd_link_delete(cmd);
-
-	return res;
-}
-//-----------------------------------------------------------------------------
-void read_sensor_task(void *arg)
-{
-	int res;
-	uint8_t sensor_data_h, sensor_data_l;
-	uint32_t raw_sensor_data;
-
-	// do job forever
-	while(1)
+	if (aws_iot_task_handle != NULL)
 	{
-		res = i2c_get_data(&sensor_data_h, &sensor_data_l);
-		if (res != ESP_OK)
-			ESP_LOGE(TAG_I2C, "Command failure, 0x%x", res);
-		else
-		{
-			raw_sensor_data = sensor_data_h << 8 | sensor_data_l;
-			ESP_LOGI(TAG_I2C, "Sensor raw: %d", raw_sensor_data);
-
-			if (aws_iot_task_handle != NULL)
-			{
-				xTaskNotify(aws_iot_task_handle, raw_sensor_data, eSetValueWithOverwrite);
-				ESP_LOGI(TAG_I2C, "AWS task notified");
-			}
-			else
-				ESP_LOGI(TAG_I2C, "No AWS task to notify");
-        }
-//		// blink led
-//		gpio_set_level(LED_PIN, led);
-//		if (led == 1)
-//			led = 0;
-//		else
-//			led = 1;
-
-		vTaskDelay(I2C_POLL_INTERVAL / portTICK_RATE_MS);
+		xTaskNotify(aws_iot_task_handle, raw_sensor_data, eSetValueWithOverwrite);
+		ESP_LOGI(TAG_I2C, "AWS task notified");
 	}
-	vTaskDelete(NULL);
-}
-//-----------------------------------------------------------------------------
-void i2c_start(void)
-{
-	int res;
-	i2c_config_t cfg;
-	i2c_cmd_handle_t cmd;
-
-	ESP_LOGI(TAG_I2C, "Initialization started");
-    cfg.mode = I2C_MODE_MASTER;
-    cfg.sda_io_num = SENSOR_SDA_PIN;
-    cfg.scl_io_num = SENSOR_SCL_PIN;
-    cfg.sda_pullup_en = GPIO_PULLUP_ENABLE;
-    cfg.scl_pullup_en = GPIO_PULLUP_ENABLE;
-    cfg.master.clk_speed = 100000;
-    i2c_param_config(I2C_NUM_0, &cfg);
-    ESP_ERROR_CHECK(i2c_driver_install(I2C_NUM_0, cfg.mode, 0, 0, 0));
-
-	ESP_LOGI(TAG_I2C, "Power-on");
-    cmd = i2c_cmd_link_create();
-    i2c_master_start(cmd);
-    ESP_ERROR_CHECK(i2c_master_write_byte(cmd, SENSOR_ADDR << 1 | I2C_MASTER_WRITE, 0x01 /*expect ACK*/));
-    ESP_ERROR_CHECK(i2c_master_write_byte(cmd, SENSOR_CMD_START, 0x01 /*expect ACK*/));
-    i2c_master_stop(cmd);
-    res = i2c_master_cmd_begin(I2C_NUM_0, cmd, 1000 / portTICK_RATE_MS);
-    if (res != ESP_OK)
-    	ESP_LOGE(TAG_I2C, "Power-on failure, 0x%x", res);
-    i2c_cmd_link_delete(cmd);
-
-	xTaskCreate(read_sensor_task, "i2c_bh1750_task", 2048, (void *)0, 10, NULL);
-	ESP_LOGI(TAG_I2C, "Task created");
+	else
+		ESP_LOGI(TAG_I2C, "No AWS task to notify");
 }
 //-----------------------------------------------------------------------------
 void aws_disconnect_handler(AWS_IoT_Client *pClient, void *data)
@@ -283,7 +172,6 @@ void app_main(void)
 	ESP_ERROR_CHECK(esp_event_loop_create_default());
 	ESP_LOGI(TAG_MAIN, "Event loop created");
 	events_group = xEventGroupCreate();
-	gpio_set_direction(LED_PIN, GPIO_MODE_OUTPUT);
 
 	wifi_start();
 

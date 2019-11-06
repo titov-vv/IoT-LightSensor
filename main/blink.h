@@ -22,7 +22,7 @@
 #define BLINK_TICK	125
 //-----------------------------------------------------------------------------
 // Function to initiate blinking background task
-void blink_start(void);
+void blink_start();
 // Function to update blinking pattern
 void set_blink_pattern(uint32_t pattern);
 //-----------------------------------------------------------------------------

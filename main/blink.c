@@ -45,7 +45,7 @@ void blink_task(void *arg)
 }
 //-----------------------------------------------------------------------------
 // Initialize LED pin and start task
-void blink_start(void)
+void blink_start()
 {
 	gpio_set_direction(LED_PIN, GPIO_MODE_OUTPUT);
 

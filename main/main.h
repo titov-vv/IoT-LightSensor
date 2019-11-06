@@ -29,4 +29,7 @@
 // Real definition is in main_iot_actuator.c
 extern EventGroupHandle_t events_group;
 //-----------------------------------------------------------------------------
+// TO BE DELETED
+void aws_notify_task_with_sensor_data(uint32_t raw_sensor_data);
+//-----------------------------------------------------------------------------
 #endif /* MAIN_MAIN_H_ */
