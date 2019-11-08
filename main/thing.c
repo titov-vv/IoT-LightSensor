@@ -18,7 +18,7 @@
 #define MAX_JSON_SIZE		512
 #define MAX_SERVER_TIMEOUT	30000
 #define JSON_VERBOSE		"verbose"
-#define JSON_NIGH_MARGIN	"high_magin"
+#define JSON_NIGH_MARGIN	"high_margin"
 #define JSON_LOW_MARGIN		"low_margin"
 #define JSON_INTERVAL		"interval"
 //-----------------------------------------------------------------------------
