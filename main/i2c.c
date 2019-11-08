@@ -7,8 +7,9 @@
 //-----------------------------------------------------------------------------
 #include "main.h"
 #include "i2c.h"
-#include "thing.h"
 
+#include <string.h>
+#include <time.h>
 #include "esp_log.h"
 #include "driver/i2c.h"
 //-----------------------------------------------------------------------------
@@ -22,6 +23,31 @@
 #define SENSOR_CMD_MODE		0x10
 // How often to get data from light sensor, ms
 #define I2C_POLL_INTERVAL	5000
+//-----------------------------------------------------------------------------
+// How many measurements use to calculate average
+#define AVG_BASE			10
+static uint32_t measurements_array[AVG_BASE];
+static int		item_ptr = AVG_BASE - 1;
+//-----------------------------------------------------------------------------
+void send_average_to_thing()
+{
+	int i;
+	LightMeasurement_t avg;
+	uint32_t sum = 0;
+	struct tm timeinfo;
+	char strftime_buf[64];
+
+	for (i=0; i<AVG_BASE; i++)
+		sum += measurements_array[i];
+	avg.data_lux = 1.2 * sum / AVG_BASE;	// Average brightness level in luxes
+	time(&avg.timestamp);
+
+	xQueueOverwrite(data_queue, &avg);
+
+	localtime_r(&avg.timestamp, &timeinfo);
+	strftime(strftime_buf, sizeof(strftime_buf), "%x %X", &timeinfo);
+	ESP_LOGI(TAG_I2C, "Avg. value sent to thing: %f @%s", avg.data_lux, strftime_buf);
+}
 //-----------------------------------------------------------------------------
 static esp_err_t i2c_get_data(uint8_t *data_h, uint8_t *data_l)
 {
@@ -65,7 +91,6 @@ void read_sensor_task(void *arg)
 {
 	int res;
 	uint8_t sensor_data_h, sensor_data_l;
-	uint32_t raw_sensor_data;
 
 	// do job forever
 	while(1)
@@ -75,10 +100,11 @@ void read_sensor_task(void *arg)
 			ESP_LOGE(TAG_I2C, "Command failure, 0x%x", res);
 		else
 		{
-			raw_sensor_data = sensor_data_h << 8 | sensor_data_l;
-			ESP_LOGI(TAG_I2C, "Sensor raw: %d", raw_sensor_data);
-
-			aws_notify_task_with_sensor_data(raw_sensor_data);
+			measurements_array[item_ptr] = sensor_data_h << 8 | sensor_data_l;
+			ESP_LOGI(TAG_I2C, "Sensor raw (%d): %d", item_ptr, measurements_array[item_ptr]);
+			item_ptr--;
+			if (item_ptr < 0)
+				send_average_to_thing();
         }
 
 		vTaskDelay(I2C_POLL_INTERVAL / portTICK_RATE_MS);
@@ -91,6 +117,9 @@ void i2c_start()
 	int res;
 	i2c_config_t cfg;
 	i2c_cmd_handle_t cmd;
+
+	// init array
+	memset(measurements_array, 0, sizeof(measurements_array));
 
 	ESP_LOGI(TAG_I2C, "Initialization started");
     cfg.mode = I2C_MODE_MASTER;
@@ -113,7 +142,7 @@ void i2c_start()
     	ESP_LOGE(TAG_I2C, "Power-on failure, 0x%x", res);
     i2c_cmd_link_delete(cmd);
 
-	xTaskCreate(read_sensor_task, "i2c_bh1750_task", 2048, (void *)0, 10, NULL);
+	xTaskCreate(read_sensor_task, "i2c_bh1750_task", 4096, (void *)0, 5, NULL);
 	ESP_LOGI(TAG_I2C, "Task created");
 }
 //-----------------------------------------------------------------------------
