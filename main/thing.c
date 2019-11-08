@@ -90,8 +90,10 @@ void poll_sensor_and_update(AWS_IoT_Client *client)
 	// "*_crossed" part is optional
 		root = cJSON_CreateObject();
 		cJSON_AddNumberToObject(root, "light_level", measurement.data_lux);
-		cJSON_AddNumberToObject(root, "high_crossed", high);
-		cJSON_AddNumberToObject(root, "low_crossed", low);
+		if (high == 1) // Condition here is to prevent AWS rule firing due to 0 values in verbose mode
+			cJSON_AddNumberToObject(root, "high_crossed", high);
+		if (low == 1)  // Condition here is to prevent AWS rule firing due to 0 values in verbose mode
+			cJSON_AddNumberToObject(root, "low_crossed", low);
 		cJSON_AddNumberToObject(root, "timestamp", measurement.timestamp);
 		if (!cJSON_PrintPreallocated(root, JSON_buffer, MAX_JSON_SIZE, 0 /* not formatted */))
 		{
