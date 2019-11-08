@@ -41,8 +41,8 @@ static int		rejected_tag = 0x03;
 // Thing status variables that are mirrored in Shadow
 static double last_measurement = -1;
 static int verbose = 0;
-static double high_margin = 100;
-static double low_margin = 25;
+static double high_margin = 3000;
+static double low_margin = 500;
 static int interval = 60;
 //-----------------------------------------------------------------------------
 // Global variable to keep Cloud connection reference
@@ -83,7 +83,7 @@ void poll_sensor_and_update(AWS_IoT_Client *client)
 		ESP_LOGI(TAG_AWS, "Low margin[%f] crossed: %f <- %f", high_margin, measurement.data_lux, last_measurement);
 	}
 
-	if ((verbose =  1) || (high == 1) || (low == 1))
+	if ((verbose ==  1) || (high == 1) || (low == 1))
 	{
 	// Create JSON to publish into sensor_topic[]
 	// { "light_level": 12.345, "high_crossed": 1, "low_crossed": 1, "timestamp" xxxxxx }
@@ -389,7 +389,7 @@ void aws_iot_task(void *arg)
 				if (update_needed)
 					update_shadow(&aws_client);
 			}
-			if (((xTaskGetTickCount() * portTICK_RATE_MS) - last_poll_time) > (interval * 1000 * portTICK_RATE_MS))
+			if (((xTaskGetTickCount() * portTICK_RATE_MS) - last_poll_time) > (interval * 1000))
 			{
 				poll_sensor_and_update(&aws_client);
 			}

@@ -104,7 +104,10 @@ void read_sensor_task(void *arg)
 			ESP_LOGI(TAG_I2C, "Sensor raw (%d): %d", item_ptr, measurements_array[item_ptr]);
 			item_ptr--;
 			if (item_ptr < 0)
+			{
 				send_average_to_thing();
+				item_ptr = AVG_BASE - 1;
+			}
         }
 
 		vTaskDelay(I2C_POLL_INTERVAL / portTICK_RATE_MS);
