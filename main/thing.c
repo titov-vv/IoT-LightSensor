@@ -25,6 +25,7 @@
 static bool update_needed = true;
 static bool update_inprogress = false;
 static uint32_t publish_time = 0;
+static uint32_t last_poll_time = 0;
 static char AWS_host[255] = AWS_HOST;
 static uint32_t AWS_port = AWS_PORT;
 // Topic names should be static as it will be lost from stack after exit from suscribtion function
@@ -32,15 +33,17 @@ static const char update_topic[] = "$aws/things/" AWS_CLIENTID "/shadow/update";
 static const char delta_topic[] = "$aws/things/" AWS_CLIENTID "/shadow/update/delta";
 static const char accepted_topic[] = "$aws/things/" AWS_CLIENTID "/shadow/update/accepted";
 static const char rejected_topic[] = "$aws/things/" AWS_CLIENTID "/shadow/update/rejected";
+static const char sensor_topic[] = "main/sensor/" AWS_CLIENTID;
 // Tags for faster distiguish between accept/reject status updates
 static int		delta_tag = 0x01;
 static int		accepted_tag = 0x02;
 static int		rejected_tag = 0x03;
 // Thing status variables that are mirrored in Shadow
-//static int verbose = 0;
-//static double high_margin = 100;
-//static double low_margin = 25;
-//static int interval = 60;
+static double last_measurement = -1;
+static int verbose = 0;
+static double high_margin = 100;
+static double low_margin = 25;
+static int interval = 60;
 //-----------------------------------------------------------------------------
 // Global variable to keep Cloud connection reference
 static AWS_IoT_Client aws_client;
@@ -50,59 +53,74 @@ static AWS_IoT_Client aws_client;
 //-----------------------------------------------------------------------------
 TaskHandle_t aws_iot_task_handle = NULL;
 //-----------------------------------------------------------------------------
-void aws_notify_task_with_sensor_data(uint32_t raw_sensor_data)
+// Get data from I2C queue
+// If verbose = 1 publish it to the cloud
+// Check data across marging - publish to the cloud if crossed
+void poll_sensor_and_update(AWS_IoT_Client *client)
 {
-	if (aws_iot_task_handle != NULL)
+	IoT_Error_t res = FAILURE;
+	int low = 0, high = 0;
+	LightMeasurement_t measurement;
+	cJSON *root;
+	char JSON_buffer[MAX_JSON_SIZE];
+
+	if (xQueueReceive(data_queue, &measurement, 0) == pdFALSE)
 	{
-		xTaskNotify(aws_iot_task_handle, raw_sensor_data, eSetValueWithOverwrite);
-		ESP_LOGI(TAG_I2C, "AWS task notified");
+		ESP_LOGE(TAG_AWS, "Sensor queue is empty");
+		return;
 	}
-	else
-		ESP_LOGI(TAG_I2C, "No AWS task to notify");
-}
-//-----------------------------------------------------------------------------
-void validate_lamp_state()
-{
-	time_t t_now;
-	struct tm tm_now;
-	uint32_t blink_status;
+	ESP_LOGI(TAG_AWS, "Measurement received: %f", measurement.data_lux);
 
-	time(&t_now);
-	localtime_r(&t_now, &tm_now);
+// Check margins
+	if ((measurement.data_lux > high_margin) && (last_measurement <= high_margin))
+	{
+		high = 1;
+		ESP_LOGI(TAG_AWS, "High margin[%f] crossed: %f -> %f", high_margin, last_measurement, measurement.data_lux);
+	}
+	if ((measurement.data_lux < low_margin) && ((last_measurement >= low_margin) || (last_measurement < 0)))
+	{
+		low = 1;
+		ESP_LOGI(TAG_AWS, "Low margin[%f] crossed: %f <- %f", high_margin, measurement.data_lux, last_measurement);
+	}
 
-//	xTaskNotifyWait(0x00, ULONG_MAX, &sensor_data, 0);
-//	ESP_LOGI(TAG_AWS, "Got from I2C task %d", sensor_data);
-//    // Make a test with JSON simple message:
-//    //        {
-//    //        	"data": 12.345
-//    //        }
-//    root = cJSON_CreateObject();
-//    cJSON_AddNumberToObject(root, "data", sensor_data);
-//    if (!cJSON_PrintPreallocated(root, JSON_buffer, MAX_JSON_SIZE, 1 /* formatted */))
-//    {
-//    	ESP_LOGW(TAG_AWS, "JSON buffer too small");
-//        JSON_buffer[0] = 0;
-//    }
-//    cJSON_Delete(root);
-//    ESP_LOGI(TAG_AWS, "JSON message: %s", JSON_buffer);
-//
-//    paramsQOS0.payload = (void *) JSON_buffer;
-//    paramsQOS0.payloadLen = strlen(JSON_buffer);
-//    rc = aws_iot_mqtt_publish(&aws_client, AWS_TOPIC, topic_len, &paramsQOS0);
-//    if (rc == SUCCESS)
-//    	ESP_LOGI(TAG_AWS, "MQTT message published");
-//    else
-//      	ESP_LOGE(TAG_AWS, "MQTT publish failure: %d ", rc);
+	if ((verbose =  1) || (high == 1) || (low == 1))
+	{
+	// Create JSON to publish into sensor_topic[]
+	// { "light_level": 12.345, "high_crossed": 1, "low_crossed": 1, "timestamp" xxxxxx }
+	// "*_crossed" part is optional
+		root = cJSON_CreateObject();
+		cJSON_AddNumberToObject(root, "light_level", measurement.data_lux);
+		cJSON_AddNumberToObject(root, "high_crossed", high);
+		cJSON_AddNumberToObject(root, "low_crossed", low);
+		cJSON_AddNumberToObject(root, "timestamp", measurement.timestamp);
+		if (!cJSON_PrintPreallocated(root, JSON_buffer, MAX_JSON_SIZE, 0 /* not formatted */))
+		{
+			ESP_LOGW(TAG_AWS, "JSON buffer too small");
+			JSON_buffer[0] = 0;
+		}
+		cJSON_Delete(root);
+		ESP_LOGI(TAG_AWS, "JSON message: %s", JSON_buffer);
 
-	blink_status = 0x55555555;
-	set_blink_pattern(blink_status);
+		ESP_LOGI(TAG_AWS, "MQTT publish to: %s", update_topic);
+		IoT_Publish_Message_Params paramsQOS0;
+		paramsQOS0.qos = QOS0;
+		paramsQOS0.isRetained = 0;
+		paramsQOS0.payload = (void *) JSON_buffer;
+		paramsQOS0.payloadLen = strlen(JSON_buffer);
+		res = aws_iot_mqtt_publish(client, sensor_topic, strlen(sensor_topic), &paramsQOS0);
+		if (res == SUCCESS)
+			ESP_LOGI(TAG_AWS, "MQTT message published");
+		else
+			ESP_LOGE(TAG_AWS, "MQTT publish failure: %d ", res);
+	}
+    last_measurement = measurement.data_lux;
+	last_poll_time = xTaskGetTickCount() * portTICK_RATE_MS;
 }
 //-----------------------------------------------------------------------------
 static void aws_disconnect_handler(AWS_IoT_Client *pClient, void *data)
 {
     ESP_LOGW(TAG_AWS, "MQTT Disconnected. Lamp is off");
 
-////    LampStatus = 0;
     update_needed = true;
     update_inprogress = false;
 }
@@ -111,7 +129,7 @@ static void delta_callback(AWS_IoT_Client *pClient, char *topicName, uint16_t to
                                     IoT_Publish_Message_Params *params, void *pData)
 {
 	int topic_tag;
-	cJSON *root, *state/* , *value */;
+	cJSON *root, *state, *value;
   	char JSON_buffer[MAX_JSON_SIZE];
 
 	topic_tag = *((int *)pData);
@@ -137,34 +155,51 @@ static void delta_callback(AWS_IoT_Client *pClient, char *topicName, uint16_t to
       	ESP_LOGE(TAG_AWS, "No 'state' found in delta update");
     }
 
-//    value = cJSON_GetObjectItemCaseSensitive(state, JSON_VERBOSE);
-//    if (cJSON_IsNumber(value))
-//    {
-//    	if ((value->valueint != 0)&&(value->valueint != 1))
-//    	{
-//    		ESP_LOGE(TAG_AWS, "Bad lamp status value: %d", value->valueint);
-//    	}
-//    	else
-//    	{
-//    		ESP_LOGI(TAG_AWS, "New lamp status: %d", value->valueint);
-//    		LampStatus = value->valueint;
-//    		update_needed = true;
-//    	}
-//    }
-//
-//    value = cJSON_GetObjectItemCaseSensitive(state, JSON_NIGHT_START);
-//    if (cJSON_IsString(value) && (value->valuestring != NULL))
-//    {
-//    	ESP_LOGI(TAG_AWS, "New night start time: %s", value->valuestring);
-//    	update_needed = ParseTime(value->valuestring, &night_start_hh, &night_start_mm);
-//    }
-//
-//    value = cJSON_GetObjectItemCaseSensitive(state, JSON_NIGHT_END);
-//    if (cJSON_IsString(value) && (value->valuestring != NULL))
-//    {
-//    	ESP_LOGI(TAG_AWS, "New night end time: %s", value->valuestring);
-//    	update_needed = ParseTime(value->valuestring, &night_end_hh, &night_end_mm);
-//    }
+    value = cJSON_GetObjectItemCaseSensitive(state, JSON_VERBOSE);
+    if (cJSON_IsNumber(value))
+    {
+    	if ((value->valueint != 0)&&(value->valueint != 1))
+    	{
+    		ESP_LOGE(TAG_AWS, "Bad verbose value: %d", value->valueint);
+    	}
+    	else
+    	{
+    		ESP_LOGI(TAG_AWS, "Verbose set to: %d", value->valueint);
+    		verbose = value->valueint;
+    		update_needed = true;
+    	}
+    }
+
+    value = cJSON_GetObjectItemCaseSensitive(state, JSON_NIGH_MARGIN);
+    if (cJSON_IsNumber(value))
+    {
+    	ESP_LOGI(TAG_AWS, "High margin set to: %f, lux", value->valuedouble);
+        high_margin = value->valuedouble;
+        update_needed = true;
+    }
+
+    value = cJSON_GetObjectItemCaseSensitive(state, JSON_LOW_MARGIN);
+    if (cJSON_IsNumber(value))
+    {
+    	ESP_LOGI(TAG_AWS, "Low margin set to: %f, lux", value->valuedouble);
+        low_margin = value->valuedouble;
+        update_needed = true;
+    }
+
+    value = cJSON_GetObjectItemCaseSensitive(state, JSON_INTERVAL);
+    if (cJSON_IsNumber(value))
+    {
+    	if (value->valueint <= 0)
+        {
+        	ESP_LOGE(TAG_AWS, "Bad interval value: %d", value->valueint);
+        }
+        else
+        {
+        	ESP_LOGI(TAG_AWS, "Interval set to: %d, s", value->valueint);
+        	interval = value->valueint;
+        	update_needed = true;
+        }
+    }
 }
 //-----------------------------------------------------------------------------
 static void status_callback(AWS_IoT_Client *pClient, char *topicName, uint16_t topicNameLen,
@@ -286,18 +321,17 @@ void update_shadow(AWS_IoT_Client *client)
 	char JSON_buffer[MAX_JSON_SIZE];
 
 // Post following JSON for update
-// { "state": { "reported": { JSON_LAMP_STATUS: 0, JSON_NIGHT_START: "23:00", JSON_NIGHT_END: "07:00"}}}
+// { "state": { "reported": { JSON_VERBOSE: 0, JSON_NIGH_MARGIN: 100.0, JSON_LOW_MARGIN: 25.0, JSON_INTERVAL: 60}}}
 	ESP_LOGI(TAG_AWS, "Report current state");
 	root = cJSON_CreateObject();
 	state = cJSON_CreateObject();
 	cJSON_AddItemToObject(root, "state", state);
 	reported = cJSON_CreateObject();
 	cJSON_AddItemToObject(state, "reported", reported);
-//	cJSON_AddNumberToObject(reported, JSON_LAMP_STATUS, LampStatus);
-//	sprintf(time_buffer, "%02d:%02d", night_start_hh, night_start_mm);
-//	cJSON_AddStringToObject(reported, JSON_NIGHT_START, time_buffer);
-//	sprintf(time_buffer, "%02d:%02d", night_end_hh, night_end_mm);
-//	cJSON_AddStringToObject(reported, JSON_NIGHT_END, time_buffer);
+	cJSON_AddNumberToObject(reported, JSON_VERBOSE, verbose);
+	cJSON_AddNumberToObject(reported, JSON_NIGH_MARGIN, high_margin);
+	cJSON_AddNumberToObject(reported, JSON_LOW_MARGIN, low_margin);
+	cJSON_AddNumberToObject(reported, JSON_INTERVAL, interval);
 	if (!cJSON_PrintPreallocated(root, JSON_buffer, MAX_JSON_SIZE, 0 /* not formatted */))
 	{
 		ESP_LOGW(TAG_AWS, "JSON buffer too small");
@@ -316,7 +350,7 @@ void update_shadow(AWS_IoT_Client *client)
     if (res == SUCCESS)
     {
     	publish_time = xTaskGetTickCount() * portTICK_RATE_MS;
-    	ESP_LOGI(TAG_AWS, "MQTT message published @%d", publish_time);
+    	ESP_LOGI(TAG_AWS, "MQTT message published");
     	update_needed = false;
     	update_inprogress = true;
     }
@@ -335,7 +369,6 @@ void aws_iot_task(void *arg)
 	while (1)
 	{
 		res = aws_iot_mqtt_yield(&aws_client, 100);
-		validate_lamp_state();
 
 		switch(res)
 		{
@@ -355,6 +388,10 @@ void aws_iot_task(void *arg)
 			{
 				if (update_needed)
 					update_shadow(&aws_client);
+			}
+			if (((xTaskGetTickCount() * portTICK_RATE_MS) - last_poll_time) > (interval * 1000 * portTICK_RATE_MS))
+			{
+				poll_sensor_and_update(&aws_client);
 			}
 			break;
 		case NETWORK_ATTEMPTING_RECONNECT:		// Automatic re-connect is in progress
