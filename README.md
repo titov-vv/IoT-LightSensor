@@ -1,4 +1,4 @@
-# AWS IoT sensor
+# ESP32 AWS IoT sensor
 
 ESP32 draft project to report data from a light sensor to AWS IoT cloud topic
 
